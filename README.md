@@ -19,4 +19,8 @@ If you have several Filters you want to apply, just rerun the script with your o
 
 6. run gpx-info.ps1 with
 `./gpx-info.ps1`
-Enter the Path of your gpx file. The Script will output the timestamp of the first and last Waypoint of your trip and generates an SQL Query to filter between these Dates. You can use that to use in either [HeidiSQL](https://www.heidisql.com/ "HeidiSQL") or [pgAdmin](https://www.pgadmin.org/ "pgAdmin") to show you the exact trip inside the Database. For now you need to delete the wrong points from the Database manually, but using these Databasepoints make it a fairly easy job to do, since you can Order and Group by longitude or latitude, which makes it easy to identify the Noise Values in your Database
+Enter the Path of your gpx file. 
+The Script will output the timestamp of the first and last Waypoint of your trip and generates an SQL Query to filter between these Dates. 
+You can use that to use in either [HeidiSQL](https://www.heidisql.com/ "HeidiSQL") or [pgAdmin](https://www.pgadmin.org/ "pgAdmin") to show you the exact trip inside the Database. 
+For now you need to delete the wrong points from the Database manually, but using these Databasepoints make it a fairly easy job to do, since you can Order and Group by longitude or latitude, 
+which makes it easy to identify the Noise Values in your Database
