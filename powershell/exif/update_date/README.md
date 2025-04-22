@@ -94,3 +94,7 @@ Where:
 * **Backups:** By default, the script uses the `-overwrite_original` flag with ExifTool, which modifies files *in place* without creating backups. This is faster but carries more risk if the process is interrupted or fails unexpectedly. To enable backups (ExifTool will create `filename.ext_original` files), comment out or remove the line `"-overwrite_original",` within the `$exiftoolArgs` array in the script.
 * **Irreversible Changes:** Modifying EXIF data and file timestamps are generally irreversible actions unless you have backups. Use with caution and consider testing on a small batch of copied files first.
 * **Verbose Output:** The script includes `Write-Verbose` commands. To see this detailed output (e.g., exact EXIF data found, parsing steps), run the script with the `-Verbose` switch: `.\exif_date_update.ps1 -Verbose`.
+
+## Disclaimer
+The author is not responsible for any data loss or file corruption that may occur as a result of using this script. **Use at your own risk and always back up important data.**
+

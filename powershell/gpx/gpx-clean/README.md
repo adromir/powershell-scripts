@@ -91,6 +91,5 @@ This PowerShell script provides a graphical user interface (GUI) for cleaning an
 * **SQL Safety:** While a basic check for `;` and `'` is included in the filter input, the script primarily *generates* SQL, it doesn't execute it. The responsibility for verifying and safely executing the generated SQL lies entirely with the user. The generated `DELETE` query is potentially destructive and requires careful review before execution.
 * **Error Handling:** Basic error handling is implemented, but complex or malformed GPX files might cause unexpected issues.
 
-## Author
-
-* Adromir
+## Disclaimer
+The author is not responsible for any data loss or file corruption that may occur as a result of using this script. **Use at your own risk and always back up important data.**

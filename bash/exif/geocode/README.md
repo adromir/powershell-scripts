@@ -91,3 +91,7 @@ Settings are managed via the GUI and optionally saved to `~/.config/exif-updater
 * **Large Files:** Processing large video files can be slow, primarily due to `exiftool` needing to read parts of the file.
 * **Date/Time Accuracy:** The script relies on accurate creation timestamps within the media files (`DateTimeOriginal`, `CreateDate`, etc.). If these are missing or incorrect, the API queries will not yield correct location data.
 * **Configuration File Location:** Settings are stored in `$HOME/.config/exif-updater/config.json`.
+
+## Disclaimer
+The author is not responsible for any data loss or file corruption that may occur as a result of using this script. **Use at your own risk and always back up important data.**
+

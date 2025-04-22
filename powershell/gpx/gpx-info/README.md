@@ -28,3 +28,6 @@ This PowerShell script parses a GPX (GPS Exchange Format) file to extract key in
 
 ```powershell
 .\gpx-info.ps1 [-gpxFilePath] <String>
+
+## Disclaimer
+The author is not responsible for any data loss or file corruption that may occur as a result of using this script. **Use at your own risk and always back up important data.**

@@ -72,3 +72,6 @@ The script uses a GUI for configuration on startup.
 * **MP4 Files:** The script *does not* modify MP4 files directly. It creates or overwrites `.xmp` sidecar files for them.
 * **Large Files:** Processing large files (especially videos, even when only writing sidecars) can take time. The script includes a warning for files over 200MB.
 * **API Limits:** Be mindful of any rate limits or usage quotas for the APIs you are using. Processing a large number of files may trigger limits.
+
+## Disclaimer
+The author is not responsible for any data loss or file corruption that may occur as a result of using this script. **Use at your own risk and always back up important data.**

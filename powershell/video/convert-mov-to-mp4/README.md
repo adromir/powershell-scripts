@@ -60,6 +60,5 @@ This PowerShell script provides a user-friendly graphical interface (GUI) to con
 * The script uses `-hide_banner` and `-nostats` for cleaner console output during conversion, relying on the `-progress pipe:1` output for the progress bar.
 * If a GPU encoder is listed as available but fails during the actual conversion, ensure your graphics drivers are fully up-to-date directly from the manufacturer (NVIDIA/Intel/AMD).
 
-## License
-
-This script is provided as-is. You are free to use, modify, and distribute it. Consider adding a specific open-source license (e.g., MIT License) if distributing more widely.
+## Disclaimer
+The author is not responsible for any data loss or file corruption that may occur as a result of using this script. **Use at your own risk and always back up important data.**

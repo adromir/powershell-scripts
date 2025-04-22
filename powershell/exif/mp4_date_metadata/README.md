@@ -97,11 +97,6 @@ The script is designed to address scenarios where these date tags are missing, e
     * The script suggests running the command manually with the `-v` (verbose) option to get more details. Copy the command shown in the console output (`Executing: exiftool.exe ...`), add `-v` after `exiftool.exe`, and run it directly in PowerShell or CMD on a *copy* of the problematic file to diagnose.
 * **Date Not Appearing in Windows Explorer:** Windows Explorer most commonly reads the `CreateDate` tag for the "Media created" column. This script writes `CreateDate`, `MediaCreateDate`, and `TrackCreateDate`. If the date still doesn't show after running the script, the file might be unusual, or Explorer might be caching old data (try refreshing with F5 or restarting Explorer).
 
-## License
 
-(Optional: Add a license here, e.g., MIT License)
-
-MIT LicenseCopyright (c) [Year] [Your Name/Alias]Permission is hereby granted, free of charge, to any person obtaining a copyof this software and associated documentation files (the "Software"), to dealin the Software without restriction, including without limitation the rightsto use, copy, modify, merge, publish, distribute, sublicense, and/or sellcopies of the Software, and to permit persons to whom the Software isfurnished to do so, subject to the following conditions:The above copyright notice and this permission notice shall be included in allcopies or substantial portions of the Software.THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS ORIMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THEAUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHERLIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THESOFTWARE.
 ## Disclaimer
-
-This script modifies files directly without creating backups. The author is not responsible for any data loss or file corruption that may occur as a result of using this script. **Use at your own risk and always back up important data.**
+The author is not responsible for any data loss or file corruption that may occur as a result of using this script. **Use at your own risk and always back up important data.**
