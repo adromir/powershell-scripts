@@ -1,10 +1,13 @@
 <#
 .SYNOPSIS
-Searches a selected folder for image and MP4 files, optionally updating EXIF/XMP data (GPS, country, city, country code).
+Searches a selected folder for image and MP4 files, optionally updating EXIF/XMP data.
+For Images: Updates GPS, country, city, country code. Writes to existing XMP sidecar if present, otherwise writes to image file directly.
+For MP4s: Updates ONLY GPS coordinates directly into the MP4 file, overwriting the original. Country/City/Code are NOT written to MP4s.
 Queries a primary API (Dawarich) for location data based on the file's creation date.
 Optionally uses reverse geocoding via a secondary API (Photon) if primary data is missing or user chooses to always query.
-Writes the found data using exiftool. For images, writes to existing XMP sidecar if present, otherwise writes to image file directly. For MP4s, always writes to XMP sidecar (overwriting existing).
+Writes the found data using exiftool.
 Includes a GUI for configuration and options.
+Outputs lists of skipped files at the end.
 
 .DESCRIPTION
 This script performs the following steps:
@@ -15,10 +18,10 @@ This script performs the following steps:
     - Photon API URL (for reverse geocoding)
     - Default Time Window (seconds)
     - Option to Save Configuration
-    - Option to Overwrite Existing EXIF Data
-    - Option to Always Query Photon API for Location Details
+    - Option to Overwrite Existing EXIF Data (Applies to all relevant tags for images, only GPS for MP4s)
+    - Option to Always Query Photon API for Location Details (Photon results used for Country/City/Code for images, but NOT written to MP4s)
 3.  If the user clicks OK in the GUI:
-    - Saves the configuration if requested (using new key names).
+    - Saves the configuration if requested.
     - Prompts the user to select a folder to scan using a GUI.
     - Searches the selected folder for supported image/video files.
     - Reads EXIF data for each file using exiftool.
@@ -28,17 +31,20 @@ This script performs the following steps:
         b. Queries the configured Dawarich API (exact match first, then time window).
         c. Selects the closest valid match.
         d. If coordinates found:
-            i.  Optionally queries Photon API for missing country/city/country code, or if 'Always Query Photon' is checked. Photon results take precedence if this option is checked.
-            ii. Writes GPS, Country, City, and Country Code (using XMP tag) using exiftool.
-                - For MP4 files: Data is written to a separate .xmp sidecar file (deleting any existing sidecar first).
-                - For Image files: Data is written to an existing .xmp sidecar if found, otherwise directly into the image file.
+            i.   Optionally queries Photon API for missing country/city/country code (for images), or if 'Always Query Photon' is checked. Photon results take precedence if this option is checked (for images).
+            ii.  Writes data using exiftool:
+                 - For MP4 files: Writes ONLY GPSLatitude*, GPSLongitude* tags directly into the MP4 file using -overwrite_original.
+                 - For Image files: Writes GPS*, Country, City, and Country Code (XMP tag). Data is written to an existing .xmp sidecar if found, otherwise directly into the image file using -overwrite_original.
+        e. If no suitable coordinates are found via the API, the file is added to a "skipped (no API data)" list.
+    - If processing is not needed (data exists, overwrite off), the file is added to a "skipped (already has data)" list.
 4.  Outputs status messages during processing, including warnings for large files.
+5.  Outputs a final summary including counts of processed, updated, and error files, followed by lists of skipped files (if any).
 
 .NOTES
 Ensure that exiftool.exe is either in the system PATH or the full path is specified correctly (now defaults or via config file/GUI).
 The API keys and URLs are now primarily managed via the GUI and optional config file.
-Processing large video files can be slow due to I/O limitations. Writing to XMP sidecars for MP4s is much faster.
-Writing EXIF data overwrites the original image files (using exiftool -overwrite_original) ONLY if an XMP sidecar does not already exist for that image. If a sidecar exists, it will be updated instead. MP4 files are NOT modified; .xmp files are created/updated instead (by deleting and recreating). It is strongly recommended to back up your files beforehand!
+Processing large video files can be slow due to I/O limitations.
+Writing data overwrites the original files (using exiftool -overwrite_original) for MP4s and for images that do NOT have an existing XMP sidecar. If an image sidecar exists, it will be updated instead. It is strongly recommended to back up your files beforehand!
 The configuration file (config.json) stores settings, including the API key, in plain text in the script's directory. Handle this file with care.
 #>
 
@@ -268,7 +274,7 @@ function Show-ConfigurationGui {
     $checkboxOverwrite = New-Object System.Windows.Forms.CheckBox
     $checkboxOverwrite.Location = New-Object System.Drawing.Point(15, $yPos)
     $checkboxOverwrite.Size = New-Object System.Drawing.Size(400, $controlHeight)
-    $checkboxOverwrite.Text = "Overwrite existing GPS/Country/City/Code data in files" # Updated text
+    $checkboxOverwrite.Text = "Overwrite existing data (GPS/Country/City/Code for Images, ONLY GPS for MP4s)" # Updated text
     $checkboxOverwrite.Checked = $InitialConfig.overwriteExisting
     $form.Controls.Add($checkboxOverwrite)
     $yPos += $controlHeight + $spacing
@@ -277,7 +283,7 @@ function Show-ConfigurationGui {
     $checkboxAlwaysQueryPhoton = New-Object System.Windows.Forms.CheckBox
     $checkboxAlwaysQueryPhoton.Location = New-Object System.Drawing.Point(15, $yPos)
     $checkboxAlwaysQueryPhoton.Size = New-Object System.Drawing.Size(400, $controlHeight)
-    $checkboxAlwaysQueryPhoton.Text = "Always query Photon API (overwrites Dawarich location)" # New checkbox
+    $checkboxAlwaysQueryPhoton.Text = "Always query Photon API (overwrites Dawarich location details for Images)" # Updated text
     $checkboxAlwaysQueryPhoton.Checked = $InitialConfig.alwaysQueryPhoton
     $form.Controls.Add($checkboxAlwaysQueryPhoton)
     $yPos += $controlHeight + $spacing
@@ -446,10 +452,10 @@ function Get-DawarichDataFromApi {
         Write-Error "Error querying Dawarich API ($apiUrlEffective): $($_.Exception.Message)"
         if ($_.Exception.Response) {
              try {
-                $stream = $_.Exception.Response.GetResponseStream()
-                $reader = New-Object System.IO.StreamReader($stream)
-                $responseBody = $reader.ReadToEnd();
-                Write-Error "API Response Body: $responseBody"
+                 $stream = $_.Exception.Response.GetResponseStream()
+                 $reader = New-Object System.IO.StreamReader($stream)
+                 $responseBody = $reader.ReadToEnd();
+                 Write-Error "API Response Body: $responseBody"
              } catch { Write-Error "Could not read error response body." }
         }
         return $null
@@ -511,8 +517,7 @@ function Get-LocationFromPhoton {
 }
 
 # Function to write EXIF/XMP data using exiftool
-# Now includes CountryCode and uses XMP tag for it
-# ** MODIFIED ** to delete existing XMP before writing new one for MP4
+# ** MODIFIED **: Writes ONLY GPS to MP4 directly. Writes GPS/Country/City/Code to Images (Sidecar or Direct).
 function Set-ExifData {
     param(
         [string]$ExiftoolExePath,
@@ -528,7 +533,7 @@ function Set-ExifData {
     $fileInfo = Get-Item -LiteralPath $FilePath
     $isMp4 = $fileInfo.Extension.ToLower() -eq ".mp4"
 
-    # Convert Lat/Lon
+    # Convert Lat/Lon for GPS tags
     $latStr = $Latitude.ToString([System.Globalization.CultureInfo]::InvariantCulture)
     $lonStr = $Longitude.ToString([System.Globalization.CultureInfo]::InvariantCulture)
     $latRef = if ($Latitude -ge 0) { "N" } else { "S" }
@@ -536,60 +541,62 @@ function Set-ExifData {
     $latAbs = [Math]::Abs($Latitude).ToString([System.Globalization.CultureInfo]::InvariantCulture)
     $lonAbs = [Math]::Abs($Longitude).ToString([System.Globalization.CultureInfo]::InvariantCulture)
 
-    # Base arguments for tags
-    $tagArgs = @(
-        "-GPSLatitude=$latAbs",
-        "-GPSLatitudeRef=$latRef",
-        "-GPSLongitude=$lonAbs",
-        "-GPSLongitudeRef=$lonRef"
-    )
-    if (-not [string]::IsNullOrWhiteSpace($Country)) {
-        $tagArgs += "-Country=`"$Country`"" # Quote value
-    }
-    if (-not [string]::IsNullOrWhiteSpace($City)) {
-        $tagArgs += "-City=`"$City`"" # Quote value
-    }
-    if (-not [string]::IsNullOrWhiteSpace($CountryCode)) {
-        # Use standard XMP tag for Country Code
-        $tagArgs += "-XMP-iptcCore:CountryCode=`"$CountryCode`""
-    }
-
-    # --- Determine output target and specific arguments ---
+    # --- Determine Tags, Output Target, and Exiftool Arguments ---
+    $tagArgs = @()
     $exifArgs = @()
     $outputTargetDescription = ""
-    $xmpFilePath = "" # Initialize outside the if block
+    $xmpFilePath = ""
 
     if ($isMp4) {
-        # Write to XMP Sidecar file for MP4
-        $xmpFilePath = [System.IO.Path]::ChangeExtension($FilePath, ".xmp")
-        $outputTargetDescription = "XMP sidecar '$([System.IO.Path]::GetFileName($xmpFilePath))'"
+        # --- MP4: Write ONLY GPS tags directly to the file ---
+        $outputTargetDescription = "GPS into MP4 file '$($fileInfo.Name)'"
 
-        # **FIX**: Delete existing XMP file first to ensure overwrite/update via -o
-        if (Test-Path -LiteralPath $xmpFilePath -PathType Leaf) {
-            Write-Verbose "Removing existing XMP sidecar: $xmpFilePath"
-            Remove-Item -LiteralPath $xmpFilePath -Force -ErrorAction SilentlyContinue
-        }
+        # Only include GPS tags for MP4
+        $tagArgs = @(
+            "-GPSLatitude=$latAbs",
+            "-GPSLatitudeRef=$latRef",
+            "-GPSLongitude=$lonAbs",
+            "-GPSLongitudeRef=$lonRef"
+        )
 
+        $exifArgs += "-overwrite_original" # Overwrite the original MP4
         $exifArgs += $tagArgs
-        $exifArgs += "-o"                # Specify output file argument
-        $exifArgs += "`"$xmpFilePath`""  # Add quoted XMP file path
-        # No source file needed as final arg when using -o to create sidecar from tags
-        # Exiftool creates the XMP file based on the tags provided.
+        $exifArgs += "`"$FilePath`""       # Target file is the MP4 itself
 
     } else {
-        # For non-MP4 files (images), check if sidecar exists
+        # --- Image Files: Write all tags (GPS, Country, City, Code) ---
+
+        # Include all relevant tags for images
+        $tagArgs = @(
+            "-GPSLatitude=$latAbs",
+            "-GPSLatitudeRef=$latRef",
+            "-GPSLongitude=$lonAbs",
+            "-GPSLongitudeRef=$lonRef"
+        )
+        if (-not [string]::IsNullOrWhiteSpace($Country)) {
+            $tagArgs += "-Country=`"$Country`"" # Quote value
+        }
+        if (-not [string]::IsNullOrWhiteSpace($City)) {
+            $tagArgs += "-City=`"$City`"" # Quote value
+        }
+        if (-not [string]::IsNullOrWhiteSpace($CountryCode)) {
+            # Use standard XMP tag for Country Code
+            $tagArgs += "-XMP-iptcCore:CountryCode=`"$CountryCode`""
+        }
+
+        # Check if XMP sidecar exists for the image
         $xmpFilePath = [System.IO.Path]::ChangeExtension($FilePath, ".xmp")
         if (Test-Path -LiteralPath $xmpFilePath -PathType Leaf) {
             # Sidecar exists for image, update it
             $outputTargetDescription = "existing XMP sidecar '$([System.IO.Path]::GetFileName($xmpFilePath))'"
             $exifArgs += $tagArgs
-            $exifArgs += "-o"
-            $exifArgs += "`"$xmpFilePath`""
+            $exifArgs += "-o"               # Specify output file argument
+            $exifArgs += "`"$xmpFilePath`"" # Add quoted XMP file path
             # Add source file when updating existing sidecar via -o
             $exifArgs += "`"$FilePath`""
         } else {
             # Sidecar does not exist for image, write directly to image file
-            $outputTargetDescription = "file '$($fileInfo.Name)'"
+            $outputTargetDescription = "metadata into image file '$($fileInfo.Name)'"
             $exifArgs += "-overwrite_original"
             $exifArgs += $tagArgs
             $exifArgs += "`"$FilePath`""
@@ -622,23 +629,23 @@ function Set-ExifData {
 
         # Check exit code after waiting
         if ($process.ExitCode -ne 0) {
-             # Treat Exit Code 1 as error unless it's "Nothing to write".
-             # The "already exists" error should be prevented by deleting first for MP4s.
-             # For images, updating existing XMP via -o might give "Nothing to write".
-             if ($process.ExitCode -eq 1 -and ($stdError -match 'Nothing to write|0 image files updated|0 output files created')) {
-                  Write-Host "   -> No changes needed for ${outputTargetDescription} (Tags likely identical)." -ForegroundColor Yellow
-                  if ($stdError -notmatch 'Nothing to write|0 image files updated|0 output files created') { Write-Warning "Exiftool write warnings: $stdError"}
-                  return $true # Treat as success/non-fatal
-             } else {
-                 Write-Error "Exiftool write operation exited with code $($process.ExitCode) for ${outputTargetDescription}. Stderr: $stdError Stdout: $stdOutput"
-                 return $false # Real error
-             }
+            # Treat Exit Code 1 as error unless it's "Nothing to write".
+            if ($process.ExitCode -eq 1 -and ($stdError -match 'Nothing to write|0 image files updated|0 output files created|0 video files updated')) {
+                Write-Host "    -> No changes needed for ${outputTargetDescription} (Tags likely identical)." -ForegroundColor Yellow
+                if ($stdError -notmatch 'Nothing to write|0 image files updated|0 output files created|0 video files updated') { Write-Warning "Exiftool write warnings: $stdError"}
+                return $true # Treat as success/non-fatal
+            } else {
+                Write-Error "Exiftool write operation exited with code $($process.ExitCode) for ${outputTargetDescription}. Stderr: $stdError Stdout: $stdOutput"
+                return $false # Real error
+            }
         } else {
-             $successMsg = if ($isMp4 -or (Test-Path -LiteralPath $xmpFilePath -PathType Leaf)) { "Metadata successfully written to" } else { "EXIF data successfully written to" } # Adjust success message based on target
-             Write-Host "   -> $successMsg ${outputTargetDescription}." -ForegroundColor Green
-             if (-not [string]::IsNullOrWhiteSpace($stdOutput) -and $stdOutput -notmatch '1 image files updated|1 output files created') { Write-Verbose "Exiftool write output: $stdOutput"}
-             if (-not [string]::IsNullOrWhiteSpace($stdError) -and $stdError -notmatch '1 image files updated|1 output files created') { Write-Warning "Exiftool write warnings: $stdError"}
-             return $true
+            $successMsg = "Metadata successfully written to" # Generic message applicable to file or sidecar
+            Write-Host "    -> $successMsg ${outputTargetDescription}." -ForegroundColor Green
+            # Check for standard success messages before logging verbose output/warnings
+            $successPattern = '1 image files updated|1 output files created|1 video files updated'
+            if (-not [string]::IsNullOrWhiteSpace($stdOutput) -and $stdOutput -notmatch $successPattern) { Write-Verbose "Exiftool write output: $stdOutput"}
+            if (-not [string]::IsNullOrWhiteSpace($stdError) -and $stdError -notmatch $successPattern) { Write-Warning "Exiftool write warnings: $stdError"}
+            return $true
         }
     } catch {
         Write-Error "Error executing exiftool write for ${outputTargetDescription}: $($_.Exception.Message)"
@@ -703,7 +710,7 @@ if (-not $exiftoolFound) {
 Write-Host "Using exiftool: $exiftoolPath"
 # Write-Host "Using Exiftool timeout: $($exiftoolTimeoutMs / 1000) seconds" # Removed
 if ($overwriteExistingData) { Write-Host "Overwrite existing data flag is ON." -ForegroundColor Yellow }
-if ($alwaysQueryPhoton) { Write-Host "Always Query Photon flag is ON." -ForegroundColor Yellow }
+if ($alwaysQueryPhoton) { Write-Host "Always Query Photon flag is ON (affects image location details)." -ForegroundColor Yellow }
 
 
 # --- 1. Select Folder ---
@@ -713,7 +720,7 @@ Write-Host "Processing folder: $targetFolder"
 
 # --- 2. File Extensions ---
 $imageExtensions = @(".jpg", ".jpeg", ".png", ".tiff", ".heic", ".gif", ".cr2", ".dng")
-$videoExtensions = @(".mp4")
+$videoExtensions = @(".mp4") # Only MP4 explicitly supported for direct GPS writing
 $allExtensions = $imageExtensions + $videoExtensions
 
 # Define large file threshold in MB for warning message
@@ -733,19 +740,23 @@ if ($filesToProcess.Count -eq 0) { Write-Warning "No matching files found in fol
 
 Write-Host "$($filesToProcess.Count) files found. Starting processing..."
 $processedCount = 0; $updatedCount = 0; $errorCount = 0
+$skippedFiles = @() # List for files skipped because they already have data
+$noApiDataFiles = @() # List for files skipped due to no API match or invalid coords
 
 # --- 4. & 5. Process Files ---
 foreach ($file in $filesToProcess) {
     $processedCount++
     Write-Host "[$processedCount/$($filesToProcess.Count)] Processing file: $($file.Name)" -ForegroundColor Cyan
     $fileHadError = $false
+    $isMp4File = $file.Extension.ToLower() -eq ".mp4" # Check if current file is MP4
+    $bestMatch = $null # Initialize bestMatch for this file iteration
 
     if ($file.Length -gt $largeFileThresholdBytes) {
-        Write-Host "   -> Large file detected ($($file.Length / 1MB -as [int]) MB). Exiftool processing may take some time..." -ForegroundColor Yellow
+        Write-Host "    -> Large file detected ($($file.Length / 1MB -as [int]) MB). Exiftool processing may take some time..." -ForegroundColor Yellow
     }
 
     # ** Read EXIF data using Invoke-Expression **
-    # ** FIX**: Use XMP tag name for country code reading
+    # Read all potentially relevant tags for checking, even if not all are written back
     $exifReadArgs = @(
         "-j", "-GPSLatitude", "-GPSLongitude", "-Country", "-City", "-XMP-iptcCore:CountryCode",
         "-DateTimeOriginal", "-CreateDate", "-MediaCreateDate", "-TrackCreateDate", "-FilePath"
@@ -758,95 +769,104 @@ foreach ($file in $filesToProcess) {
         Write-Verbose "Executing exiftool read: $commandString"
         $exifOutput = Invoke-Expression $commandString -ErrorAction Stop
 
-        if ([string]::IsNullOrWhiteSpace($exifOutput)) { Write-Warning "   Exiftool read operation produced no output for '$($file.Name)'." }
+        if ([string]::IsNullOrWhiteSpace($exifOutput)) { Write-Warning "    Exiftool read operation produced no output for '$($file.Name)'." }
 
         $exifJson = $exifOutput | ConvertFrom-Json -ErrorAction SilentlyContinue
         if ($exifJson -eq $null -and -not ([string]::IsNullOrWhiteSpace($exifOutput))) {
-             Write-Warning "   Failed to parse JSON output from exiftool read for '$($file.Name)'. Raw output: $exifOutput"
-             $fileHadError = $true; $errorCount++; continue
+             Write-Warning "    Failed to parse JSON output from exiftool read for '$($file.Name)'. Raw output: $exifOutput"
+             $fileHadError = $true; $errorCount++; continue # Error, count and skip to next file
         } elseif ($exifJson -eq $null) {
-             Write-Host "   No parsable EXIF data structure retrieved for '$($file.Name)'. Skipping."
-             continue
+             Write-Host "    No parsable EXIF data structure retrieved for '$($file.Name)'. Skipping."
+             continue # No data, skip to next file
         }
 
         if ($exifJson -is [array]) {
              if ($exifJson.Count -gt 0) { $exifData = $exifJson[0] }
-             else { Write-Host "   Exiftool returned empty data array for '$($file.Name)' (No EXIF)."; $exifData = $null }
+             else { Write-Host "    Exiftool returned empty data array for '$($file.Name)' (No EXIF)."; $exifData = $null }
         } else { $exifData = $exifJson }
 
     } catch {
-        Write-Warning "   Error executing or processing exiftool read for '$($file.Name)': $($_.Exception.Message)"
-        if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { Write-Warning "   Exiftool may have exited with code $LASTEXITCODE." }
-        $fileHadError = $true; $errorCount++; continue
+        Write-Warning "    Error executing or processing exiftool read for '$($file.Name)': $($_.Exception.Message)"
+        if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { Write-Warning "    Exiftool may have exited with code $LASTEXITCODE." }
+        $fileHadError = $true; $errorCount++; continue # Error, count and skip to next file
     }
 
     if ($exifData -eq $null) { continue } # Skip if no data structure
 
     # Check existing tags
-    $gpsLat = $null; $gpsLon = $null; $country = $null; $city = $null; $countryCode = $null # Added countryCode
+    $gpsLat = $null; $gpsLon = $null; $country = $null; $city = $null; $countryCode = $null
     if ($exifData.PSObject.Properties.Name -contains 'GPSLatitude') { $gpsLat = $exifData.GPSLatitude }
     if ($exifData.PSObject.Properties.Name -contains 'GPSLongitude') { $gpsLon = $exifData.GPSLongitude }
-    if ($exifData.PSObject.Properties.Name -contains 'Country') { $country = $exifData.Country }
-    if ($exifData.PSObject.Properties.Name -contains 'City') { $city = $exifData.City }
-    # ** FIX**: Use XMP tag name for checking existing country code
-    if ($exifData.PSObject.Properties.Name -contains 'XMP-iptcCore:CountryCode') { $countryCode = $exifData.'XMP-iptcCore:CountryCode' }
+    # Only check Country/City/Code if it's NOT an MP4, as they are irrelevant for MP4 processing decision now
+    if (-not $isMp4File) {
+        if ($exifData.PSObject.Properties.Name -contains 'Country') { $country = $exifData.Country }
+        if ($exifData.PSObject.Properties.Name -contains 'City') { $city = $exifData.City }
+        if ($exifData.PSObject.Properties.Name -contains 'XMP-iptcCore:CountryCode') { $countryCode = $exifData.'XMP-iptcCore:CountryCode' }
+    }
 
     # Determine if processing is needed based on missing data OR overwrite flag
     $shouldProcessFile = $false
     if ($overwriteExistingData) {
         $shouldProcessFile = $true
-        Write-Host "   -> Overwrite flag set. Processing file..."
+        Write-Host "    -> Overwrite flag set. Processing file..."
     } else {
-        if (($gpsLat -eq $null) -or ($gpsLon -eq $null) -or ($gpsLat -eq 0 -and $gpsLon -eq 0)) { Write-Host "   -> GPS coordinates missing or zero."; $shouldProcessFile = $true }
-        if ([string]::IsNullOrWhiteSpace($country)) { Write-Host "   -> Country missing."; $shouldProcessFile = $true }
-        if ([string]::IsNullOrWhiteSpace($city)) { Write-Host "   -> City missing."; $shouldProcessFile = $true }
-        if ([string]::IsNullOrWhiteSpace($countryCode)) { Write-Host "   -> Country Code missing."; $shouldProcessFile = $true } # Added check
+        # Always check for missing GPS
+        if (($gpsLat -eq $null) -or ($gpsLon -eq $null) -or ($gpsLat -eq 0 -and $gpsLon -eq 0)) {
+            Write-Host "    -> GPS coordinates missing or zero."; $shouldProcessFile = $true
+        }
+        # Only check Country/City/Code if it's an image file
+        if (-not $isMp4File) {
+            if ([string]::IsNullOrWhiteSpace($country)) { Write-Host "    -> Country missing (Image)."; $shouldProcessFile = $true }
+            if ([string]::IsNullOrWhiteSpace($city)) { Write-Host "    -> City missing (Image)."; $shouldProcessFile = $true }
+            if ([string]::IsNullOrWhiteSpace($countryCode)) { Write-Host "    -> Country Code missing (Image)."; $shouldProcessFile = $true }
+        }
     }
 
     if (-not $shouldProcessFile) {
-         Write-Host "   -> File does not need processing (has data and overwrite flag is off)."
+         Write-Host "    -> File does not need processing (has required data and overwrite flag is off)."
+         $skippedFiles += $file.FullName # Add to skipped list
          continue # Skip to next file
     }
 
     # --- Proceed with processing only if $shouldProcessFile is true ---
 
-    # Determine creation date
+    # Determine creation date (needed for API query)
     $creationDateString = $null
     if ($exifData.PSObject.Properties.Name -contains 'DateTimeOriginal') { $creationDateString = $exifData.DateTimeOriginal }
     if ([string]::IsNullOrWhiteSpace($creationDateString) -and ($exifData.PSObject.Properties.Name -contains 'CreateDate')) { $creationDateString = $exifData.CreateDate }
     if ([string]::IsNullOrWhiteSpace($creationDateString) -and ($exifData.PSObject.Properties.Name -contains 'MediaCreateDate')) { $creationDateString = $exifData.MediaCreateDate }
     if ([string]::IsNullOrWhiteSpace($creationDateString) -and ($exifData.PSObject.Properties.Name -contains 'TrackCreateDate')) { $creationDateString = $exifData.TrackCreateDate }
 
-    if ([string]::IsNullOrWhiteSpace($creationDateString)) { Write-Warning "   Could not determine suitable creation date from EXIF for '$($file.Name)'."; $fileHadError = $true; $errorCount++; continue }
+    if ([string]::IsNullOrWhiteSpace($creationDateString)) { Write-Warning "    Could not determine suitable creation date from EXIF for '$($file.Name)'."; $fileHadError = $true; $errorCount++; continue } # Error, count and skip
 
     # Convert date for API
     $fileTimestampUTC = ConvertTo-ApiTimestamp -ExifDateTimeString $creationDateString
-    if ($fileTimestampUTC -eq $null) { Write-Warning "   Could not convert creation date '$creationDateString' for API."; $fileHadError = $true; $errorCount++; continue }
+    if ($fileTimestampUTC -eq $null) { Write-Warning "    Could not convert creation date '$creationDateString' for API."; $fileHadError = $true; $errorCount++; continue } # Error, count and skip
 
     $fileDateTime = $null
     try { $fileDateTime = [datetime]::ParseExact($fileTimestampUTC,"yyyy-MM-ddTHH:mm:ssZ", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal) }
-    catch { Write-Warning "   Failed to parse back converted UTC timestamp '$fileTimestampUTC'."; $fileHadError = $true; $errorCount++; continue }
+    catch { Write-Warning "    Failed to parse back converted UTC timestamp '$fileTimestampUTC'."; $fileHadError = $true; $errorCount++; continue } # Error, count and skip
 
-    Write-Host "   Determined creation date (UTC): $fileTimestampUTC"
+    Write-Host "    Determined creation date (UTC): $fileTimestampUTC"
 
     # --- Dawarich API Query ---
-    Write-Host "   Attempting exact Dawarich API query for $fileTimestampUTC..."
+    Write-Host "    Attempting exact Dawarich API query for $fileTimestampUTC..."
     $apiResultExact = Get-DawarichDataFromApi -BaseUrl $dawarichApiUrl -ApiKey $dawarichApiKey -StartAt $fileTimestampUTC -EndAt $fileTimestampUTC # Use renamed function/vars
-    $bestMatch = $null
+    # $bestMatch already initialized to $null
 
     if ($apiResultExact -ne $null) {
         $resultsArray = @($apiResultExact)
         if ($resultsArray.Count -gt 0) {
             $validResultsExact = $resultsArray | Where-Object { $_.PSObject.Properties.Name -contains 'latitude' -and $_.PSObject.Properties.Name -contains 'longitude' -and $_.latitude -ne $null -and $_.longitude -ne $null -and $_.latitude -ne 0 -and $_.longitude -ne 0 }
-            if ($validResultsExact.Count -gt 0) { $bestMatch = $validResultsExact[0]; Write-Host "   -> Exact match found." }
-            else { Write-Host "   -> Exact query returned results, but without valid coordinates." }
-        } else { Write-Host "   -> No results returned from exact Dawarich API query." }
-    } else { Write-Host "   -> Dawarich API query failed or returned null for exact match." }
+            if ($validResultsExact.Count -gt 0) { $bestMatch = $validResultsExact[0]; Write-Host "    -> Exact match found." }
+            else { Write-Host "    -> Exact query returned results, but without valid coordinates." }
+        } else { Write-Host "    -> No results returned from exact Dawarich API query." }
+    } else { Write-Host "    -> Dawarich API query failed or returned null for exact match." }
 
     if ($bestMatch -eq $null) {
         $startDate = $fileDateTime.AddSeconds(-$defaultTimeWindowSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ")
         $endDate = $fileDateTime.AddSeconds($defaultTimeWindowSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ")
-        Write-Host "   Attempting Dawarich API query within time window: $startDate to $endDate..."
+        Write-Host "    Attempting Dawarich API query within time window: $startDate to $endDate..."
         $apiResultRange = Get-DawarichDataFromApi -BaseUrl $dawarichApiUrl -ApiKey $dawarichApiKey -StartAt $startDate -EndAt $endDate # Use renamed function/vars
 
         if ($apiResultRange -ne $null) {
@@ -854,7 +874,7 @@ foreach ($file in $filesToProcess) {
              if ($resultsRangeArray.Count -gt 0) {
                  $validResultsRange = $resultsRangeArray | Where-Object { $_.PSObject.Properties.Name -contains 'latitude' -and $_.PSObject.Properties.Name -contains 'longitude' -and $_.latitude -ne $null -and $_.longitude -ne $null -and $_.latitude -ne 0 -and $_.longitude -ne 0 }
                  if ($validResultsRange.Count -gt 0) {
-                     Write-Host "   -> $($validResultsRange.Count) valid results found in time window. Finding closest..."
+                     Write-Host "    -> $($validResultsRange.Count) valid results found in time window. Finding closest..."
                      $closestDiff = [double]::MaxValue
                      foreach ($result in $validResultsRange) {
                          try {
@@ -872,11 +892,11 @@ foreach ($file in $filesToProcess) {
                                  if ($absDiffSeconds -lt $closestDiff) { $closestDiff = $absDiffSeconds; $bestMatch = $result } }
                          } catch { Write-Warning "Error processing timestamp: '$($result.timestamp)' - $($_.Exception.Message)" }
                      }
-                     if ($bestMatch -ne $null) { Write-Host "   -> Closest match found (Difference: $($closestDiff.ToString('F2'))s)." }
-                     else { Write-Host "   -> Could not find a valid, time-comparable result." }
-                 } else { Write-Host "   -> API query returned results, but none with valid coordinates." }
-             } else { Write-Host "   -> No results returned from API query within time window." }
-        } else { Write-Host "   -> Dawarich API query failed or returned null for time window." }
+                     if ($bestMatch -ne $null) { Write-Host "    -> Closest match found (Difference: $($closestDiff.ToString('F2'))s)." }
+                     else { Write-Host "    -> Could not find a valid, time-comparable result." }
+                 } else { Write-Host "    -> API query returned results, but none with valid coordinates." }
+             } else { Write-Host "    -> No results returned from API query within time window." }
+        } else { Write-Host "    -> Dawarich API query failed or returned null for time window." }
     }
 
     # --- Process Best Match (if found) ---
@@ -885,80 +905,115 @@ foreach ($file in $filesToProcess) {
         if ($bestMatch.PSObject.Properties.Name -contains 'latitude') { $latitude = try { [double]$bestMatch.latitude } catch { Write-Warning "Cast latitude failed."; $null } }
         if ($bestMatch.PSObject.Properties.Name -contains 'longitude') { $longitude = try { [double]$bestMatch.longitude } catch { Write-Warning "Cast longitude failed."; $null } }
 
-        if ($latitude -eq $null -or $longitude -eq $null) { Write-Warning "   -> Invalid lat/lon from Dawarich API. Skipping write."; $fileHadError = $true; $errorCount++; continue }
-
-        # Get initial values from Dawarich API result (check if properties exist)
-        $countryFromDawarich = if ($bestMatch.PSObject.Properties.Name -contains 'country') { $bestMatch.country } else { $null }
-        $cityFromDawarich = if ($bestMatch.PSObject.Properties.Name -contains 'city') { $bestMatch.city } else { $null }
-        $countryCodeFromDawarich = if ($bestMatch.PSObject.Properties.Name -contains 'country_code') { $bestMatch.country_code } else { $null } # Assuming field name 'country_code'
-
-        # Initialize variables for writing
-        $countryToWrite = $countryFromDawarich
-        $cityToWrite = $cityFromDawarich
-        $countryCodeToWrite = $countryCodeFromDawarich
-
-        # --- Photon Reverse Geocoding (if needed or forced) ---
-        $needsPhotonQuery = $false
-        if ($alwaysQueryPhoton) {
-            $needsPhotonQuery = $true
-            Write-Host "   -> 'Always Query Photon' is enabled. Querying Photon API..."
-        } elseif ([string]::IsNullOrWhiteSpace($countryFromDawarich) -or [string]::IsNullOrWhiteSpace($cityFromDawarich) -or [string]::IsNullOrWhiteSpace($countryCodeFromDawarich)) {
-             $needsPhotonQuery = $true
-             Write-Host "   -> Country, City, or Country Code missing/empty in Dawarich API result. Querying Photon API..."
+        if ($latitude -eq $null -or $longitude -eq $null) {
+             Write-Warning "    -> Invalid lat/lon from Dawarich API. Skipping write.";
+             $noApiDataFiles += $file.FullName # Add to list: invalid coords
+             $fileHadError = $true; $errorCount++; continue # Count as error, skip to next file
         }
 
-        if ($needsPhotonQuery) {
-            $locationData = Get-LocationFromPhoton -BaseUrl $photonApiUrl -Latitude $latitude -Longitude $longitude # Use renamed function/vars
-            if ($locationData -ne $null) {
-                Write-Host "      -> Photon found: Country='$($locationData.Country)', City='$($locationData.City)', Code='$($locationData.CountryCode)'"
-                # If always querying, Photon data takes precedence. Otherwise, only fill missing fields.
-                if ($alwaysQueryPhoton) {
-                    # Overwrite with Photon data only if Photon provided a value
-                    if (-not ([string]::IsNullOrWhiteSpace($locationData.Country))) { $countryToWrite = $locationData.Country }
-                    if (-not ([string]::IsNullOrWhiteSpace($locationData.City))) { $cityToWrite = $locationData.City }
-                    if (-not ([string]::IsNullOrWhiteSpace($locationData.CountryCode))) { $countryCodeToWrite = $locationData.CountryCode }
-                    Write-Host "      -> Photon results will overwrite Dawarich results where available."
-                } else {
-                    # Only fill missing data from Dawarich results
-                    if (-not ([string]::IsNullOrWhiteSpace($locationData.Country)) -and [string]::IsNullOrWhiteSpace($countryToWrite)) { $countryToWrite = $locationData.Country }
-                    if (-not ([string]::IsNullOrWhiteSpace($locationData.City)) -and [string]::IsNullOrWhiteSpace($cityToWrite)) { $cityToWrite = $locationData.City }
-                    if (-not ([string]::IsNullOrWhiteSpace($locationData.CountryCode)) -and [string]::IsNullOrWhiteSpace($countryCodeToWrite)) { $countryCodeToWrite = $locationData.CountryCode }
-                }
-            } else {
-                Write-Warning "   -> Error during Photon reverse geocoding. Using Dawarich data if available."
-                # Keep original Dawarich values as Photon failed
+        # Initialize variables for writing (relevant mainly for images)
+        $countryToWrite = $null
+        $cityToWrite = $null
+        $countryCodeToWrite = $null
+
+        # Only attempt to get/process Country/City/Code if it's an image file
+        if (-not $isMp4File) {
+            # Get initial values from Dawarich API result (check if properties exist)
+            $countryFromDawarich = if ($bestMatch.PSObject.Properties.Name -contains 'country') { $bestMatch.country } else { $null }
+            $cityFromDawarich = if ($bestMatch.PSObject.Properties.Name -contains 'city') { $bestMatch.city } else { $null }
+            $countryCodeFromDawarich = if ($bestMatch.PSObject.Properties.Name -contains 'country_code') { $bestMatch.country_code } else { $null } # Assuming field name 'country_code'
+
+            $countryToWrite = $countryFromDawarich
+            $cityToWrite = $cityFromDawarich
+            $countryCodeToWrite = $countryCodeFromDawarich
+
+            # --- Photon Reverse Geocoding (only if needed/forced for IMAGE files) ---
+            $needsPhotonQuery = $false
+            if ($alwaysQueryPhoton) {
+                $needsPhotonQuery = $true
+                Write-Host "    -> 'Always Query Photon' is enabled. Querying Photon API for image details..."
+            } elseif ([string]::IsNullOrWhiteSpace($countryFromDawarich) -or [string]::IsNullOrWhiteSpace($cityFromDawarich) -or [string]::IsNullOrWhiteSpace($countryCodeFromDawarich)) {
+                 $needsPhotonQuery = $true
+                 Write-Host "    -> Country, City, or Country Code missing/empty in Dawarich API result for image. Querying Photon API..."
             }
-        }
 
-        # --- Write EXIF/XMP Data ---
+            if ($needsPhotonQuery) {
+                $locationData = Get-LocationFromPhoton -BaseUrl $photonApiUrl -Latitude $latitude -Longitude $longitude # Use renamed function/vars
+                if ($locationData -ne $null) {
+                    Write-Host "        -> Photon found: Country='$($locationData.Country)', City='$($locationData.City)', Code='$($locationData.CountryCode)'"
+                    # If always querying, Photon data takes precedence. Otherwise, only fill missing fields.
+                    if ($alwaysQueryPhoton) {
+                        # Overwrite with Photon data only if Photon provided a value
+                        if (-not ([string]::IsNullOrWhiteSpace($locationData.Country))) { $countryToWrite = $locationData.Country }
+                        if (-not ([string]::IsNullOrWhiteSpace($locationData.City))) { $cityToWrite = $locationData.City }
+                        if (-not ([string]::IsNullOrWhiteSpace($locationData.CountryCode))) { $countryCodeToWrite = $locationData.CountryCode }
+                        Write-Host "        -> Photon results will overwrite Dawarich results where available for image."
+                    } else {
+                        # Only fill missing data from Dawarich results
+                        if (-not ([string]::IsNullOrWhiteSpace($locationData.Country)) -and [string]::IsNullOrWhiteSpace($countryToWrite)) { $countryToWrite = $locationData.Country }
+                        if (-not ([string]::IsNullOrWhiteSpace($locationData.City)) -and [string]::IsNullOrWhiteSpace($cityToWrite)) { $cityToWrite = $locationData.City }
+                        if (-not ([string]::IsNullOrWhiteSpace($locationData.CountryCode)) -and [string]::IsNullOrWhiteSpace($countryCodeToWrite)) { $countryCodeToWrite = $locationData.CountryCode }
+                    }
+                } else {
+                    Write-Warning "    -> Error during Photon reverse geocoding for image. Using Dawarich data if available."
+                    # Keep original Dawarich values as Photon failed
+                }
+            }
+        } # End if (-not $isMp4File) for location details processing
+
+        # --- Write Data ---
+        # Check coordinates again (redundant check based on above logic, but safe)
         if (($latitude -ne 0 -or $longitude -ne 0)) {
-            $targetDesc = if ($file.Extension.ToLower() -eq ".mp4") { "XMP sidecar for '$($file.Name)'" } else { "EXIF in '$($file.Name)'" }
-            # **FIX**: Use ${} for variable interpolation
-            Write-Host "   Writing data to ${targetDesc}: Lat=$latitude, Lon=$longitude, Country='$countryToWrite', City='$cityToWrite', Code='$countryCodeToWrite'"
+            if ($isMp4File) {
+                Write-Host "    Writing GPS data to MP4 '$($file.Name)': Lat=$latitude, Lon=$longitude"
+            } else {
+                Write-Host "    Writing data to Image '$($file.Name)': Lat=$latitude, Lon=$longitude, Country='$countryToWrite', City='$cityToWrite', Code='$countryCodeToWrite'"
+            }
 
+            # Call Set-ExifData - it now handles the logic for what to write based on file type
             $writeSuccess = Set-ExifData -ExiftoolExePath $exiftoolPath -FilePath $file.FullName `
                 -Latitude $latitude -Longitude $longitude `
-                -Country $countryToWrite -City $cityToWrite -CountryCode $countryCodeToWrite # Removed timeout argument
+                -Country $countryToWrite -City $cityToWrite -CountryCode $countryCodeToWrite # Pass all values; function decides what to use
 
-            if (-not $writeSuccess) { $fileHadError = $true; $errorCount++; }
+            if (-not $writeSuccess) { $fileHadError = $true; $errorCount++; } # Count write errors
             else { $updatedCount++; }
-        } else { Write-Warning "   -> Best match has invalid coordinates (Lat=0, Lon=0). Skipping write operation." }
+        } else {
+            # This case should technically not be reached due to the earlier check, but added for robustness
+            Write-Warning "    -> Best match has invalid coordinates (Lat=0, Lon=0). Skipping write operation."
+            $noApiDataFiles += $file.FullName # Add to list: invalid coords
+        }
     }
     else {
-        Write-Host "   -> No suitable GPS data found via Dawarich API for '$($file.Name)'."
+        # No bestMatch found from API
+        Write-Host "    -> No suitable GPS data found via Dawarich API for '$($file.Name)'."
+        $noApiDataFiles += $file.FullName # Add to list: no API data found
     }
 
-    if (-not $fileHadError) { Write-Host "---" } # Separator
+    # Separator only if no error occurred in this iteration
+    if (-not $fileHadError) { Write-Host "---" }
 
 } # end foreach file
 
 # --- Final Summary ---
 Write-Host "`nProcessing finished." -ForegroundColor Green
-Write-Host " * Files processed: $processedCount"
+Write-Host "--- SUMMARY ---"
+Write-Host " * Files scanned: $processedCount"
 Write-Host " * Files updated successfully: $updatedCount"
 if ($errorCount -gt 0) {
-    Write-Host " * Files with errors or warnings during processing: $errorCount" -ForegroundColor Yellow
+    Write-Host " * Files with errors during processing: $errorCount" -ForegroundColor Yellow
 }
-Write-Host "Script ended."
+
+# --- List Skipped Files ---
+if ($skippedFiles.Count -gt 0) {
+    Write-Host "`n--- Files Skipped (Already Have Data) ---" -ForegroundColor Cyan
+    $skippedFiles | ForEach-Object { Write-Host " - $_" }
+}
+
+if ($noApiDataFiles.Count -gt 0) {
+    Write-Host "`n--- Files Skipped (No Suitable API Data Found or Invalid Coordinates) ---" -ForegroundColor Cyan
+    $noApiDataFiles | ForEach-Object { Write-Host " - $_" }
+}
+
+Write-Host "`nScript ended."
 
 #endregion Main Script Logic
