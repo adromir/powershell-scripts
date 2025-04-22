@@ -1,4 +1,4 @@
-# Bash EXIF/XMP Updater Script
+# Bash EXIF/XMP Updater Script Geotagging Script with Dawarich and Photon (`geotag_media.sh`)
 
 ## Overview
 
