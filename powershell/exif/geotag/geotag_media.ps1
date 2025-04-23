@@ -3,7 +3,7 @@
 Searches a selected folder for image and MP4 files, optionally updating EXIF/XMP data.
 For Images: Updates GPS, country, city, country code. Writes to existing XMP sidecar if present, otherwise writes to image file directly.
 For MP4s: Updates ONLY GPS coordinates directly into the MP4 file, overwriting the original. Country/City/Code are NOT written to MP4s.
-Queries a primary API (Dawarich) for location data based on the file's creation date.
+Queries a primary API (Dawarich) for location data based on a time window around the file's creation date.
 Optionally uses reverse geocoding via a secondary API (Photon) if primary data is missing or user chooses to always query.
 Writes the found data using exiftool.
 Includes a GUI for configuration and options.
@@ -28,8 +28,8 @@ This script performs the following steps:
     - Determines if a file needs processing based on missing data OR the "Overwrite" flag.
     - If processing is needed:
         a. Determines the creation date.
-        b. Queries the configured Dawarich API (exact match first, then time window).
-        c. Selects the closest valid match.
+        b. Queries the configured Dawarich API using a time window around the creation date.
+        c. Selects the closest valid match within the time window.
         d. If coordinates found:
             i.   Optionally queries Photon API for missing country/city/country code (for images), or if 'Always Query Photon' is checked. Photon results take precedence if this option is checked (for images).
             ii.  Writes data using exiftool:
@@ -849,55 +849,45 @@ foreach ($file in $filesToProcess) {
 
     Write-Host "    Determined creation date (UTC): $fileTimestampUTC"
 
-    # --- Dawarich API Query ---
-    Write-Host "    Attempting exact Dawarich API query for $fileTimestampUTC..."
-    $apiResultExact = Get-DawarichDataFromApi -BaseUrl $dawarichApiUrl -ApiKey $dawarichApiKey -StartAt $fileTimestampUTC -EndAt $fileTimestampUTC # Use renamed function/vars
-    # $bestMatch already initialized to $null
+    # --- Dawarich API Query (Time Window Only) ---
+    # REMOVED Exact Match Query Block
 
-    if ($apiResultExact -ne $null) {
-        $resultsArray = @($apiResultExact)
-        if ($resultsArray.Count -gt 0) {
-            $validResultsExact = $resultsArray | Where-Object { $_.PSObject.Properties.Name -contains 'latitude' -and $_.PSObject.Properties.Name -contains 'longitude' -and $_.latitude -ne $null -and $_.longitude -ne $null -and $_.latitude -ne 0 -and $_.longitude -ne 0 }
-            if ($validResultsExact.Count -gt 0) { $bestMatch = $validResultsExact[0]; Write-Host "    -> Exact match found." }
-            else { Write-Host "    -> Exact query returned results, but without valid coordinates." }
-        } else { Write-Host "    -> No results returned from exact Dawarich API query." }
-    } else { Write-Host "    -> Dawarich API query failed or returned null for exact match." }
+    # Directly query using the time window
+    $startDate = $fileDateTime.AddSeconds(-$defaultTimeWindowSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $endDate = $fileDateTime.AddSeconds($defaultTimeWindowSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ")
+    Write-Host "    Attempting Dawarich API query within time window: $startDate to $endDate..."
+    $apiResultRange = Get-DawarichDataFromApi -BaseUrl $dawarichApiUrl -ApiKey $dawarichApiKey -StartAt $startDate -EndAt $endDate # Use renamed function/vars
 
-    if ($bestMatch -eq $null) {
-        $startDate = $fileDateTime.AddSeconds(-$defaultTimeWindowSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ")
-        $endDate = $fileDateTime.AddSeconds($defaultTimeWindowSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ")
-        Write-Host "    Attempting Dawarich API query within time window: $startDate to $endDate..."
-        $apiResultRange = Get-DawarichDataFromApi -BaseUrl $dawarichApiUrl -ApiKey $dawarichApiKey -StartAt $startDate -EndAt $endDate # Use renamed function/vars
+    # $bestMatch is already initialized to $null
+    if ($apiResultRange -ne $null) {
+         $resultsRangeArray = @($apiResultRange)
+         if ($resultsRangeArray.Count -gt 0) {
+             $validResultsRange = $resultsRangeArray | Where-Object { $_.PSObject.Properties.Name -contains 'latitude' -and $_.PSObject.Properties.Name -contains 'longitude' -and $_.latitude -ne $null -and $_.longitude -ne $null -and $_.latitude -ne 0 -and $_.longitude -ne 0 }
+             if ($validResultsRange.Count -gt 0) {
+                 Write-Host "    -> $($validResultsRange.Count) valid results found in time window. Finding closest..."
+                 $closestDiff = [double]::MaxValue
+                 foreach ($result in $validResultsRange) {
+                     try {
+                         $resultTimestamp = $null; # ... timestamp parsing ...
+                         if ($result.PSObject.Properties.Name -contains 'timestamp' -and $result.timestamp -ne $null) {
+                             if ($result.timestamp -is [long] -or $result.timestamp -is [int]) { $resultTimestamp = [datetimeoffset]::FromUnixTimeSeconds($result.timestamp).UtcDateTime }
+                             elseif ($result.timestamp -is [string]) {
+                                 try { $resultTimestamp = [datetime]::ParseExact($result.timestamp,"yyyy-MM-ddTHH:mm:ssZ", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal) } catch {
+                                     if ($result.timestamp -match "\.\d+Z$") { try { $resultTimestamp = [datetime]::ParseExact($result.timestamp,"yyyy-MM-ddTHH:mm:ss.fffffffZ", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal) } catch {}}
+                                     else { Write-Warning "Could not parse timestamp string: $($result.timestamp)" } } }
+                             else { Write-Warning "Unknown data type for timestamp: $($result.timestamp.GetType().FullName)" }
+                         } else { Write-Warning "Timestamp field missing or null." }
+                         if ($resultTimestamp -ne $null) {
+                             $timeDiff = New-TimeSpan -Start $fileDateTime -End $resultTimestamp; $absDiffSeconds = [Math]::Abs($timeDiff.TotalSeconds)
+                             if ($absDiffSeconds -lt $closestDiff) { $closestDiff = $absDiffSeconds; $bestMatch = $result } }
+                     } catch { Write-Warning "Error processing timestamp: '$($result.timestamp)' - $($_.Exception.Message)" }
+                 }
+                 if ($bestMatch -ne $null) { Write-Host "    -> Closest match found (Difference: $($closestDiff.ToString('F2'))s)." }
+                 else { Write-Host "    -> Could not find a valid, time-comparable result." }
+             } else { Write-Host "    -> API query returned results, but none with valid coordinates." }
+         } else { Write-Host "    -> No results returned from API query within time window." }
+    } else { Write-Host "    -> Dawarich API query failed or returned null for time window." }
 
-        if ($apiResultRange -ne $null) {
-             $resultsRangeArray = @($apiResultRange)
-             if ($resultsRangeArray.Count -gt 0) {
-                 $validResultsRange = $resultsRangeArray | Where-Object { $_.PSObject.Properties.Name -contains 'latitude' -and $_.PSObject.Properties.Name -contains 'longitude' -and $_.latitude -ne $null -and $_.longitude -ne $null -and $_.latitude -ne 0 -and $_.longitude -ne 0 }
-                 if ($validResultsRange.Count -gt 0) {
-                     Write-Host "    -> $($validResultsRange.Count) valid results found in time window. Finding closest..."
-                     $closestDiff = [double]::MaxValue
-                     foreach ($result in $validResultsRange) {
-                         try {
-                             $resultTimestamp = $null; # ... timestamp parsing ...
-                             if ($result.PSObject.Properties.Name -contains 'timestamp' -and $result.timestamp -ne $null) {
-                                 if ($result.timestamp -is [long] -or $result.timestamp -is [int]) { $resultTimestamp = [datetimeoffset]::FromUnixTimeSeconds($result.timestamp).UtcDateTime }
-                                 elseif ($result.timestamp -is [string]) {
-                                     try { $resultTimestamp = [datetime]::ParseExact($result.timestamp,"yyyy-MM-ddTHH:mm:ssZ", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal) } catch {
-                                         if ($result.timestamp -match "\.\d+Z$") { try { $resultTimestamp = [datetime]::ParseExact($result.timestamp,"yyyy-MM-ddTHH:mm:ss.fffffffZ", [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal) } catch {}}
-                                         else { Write-Warning "Could not parse timestamp string: $($result.timestamp)" } } }
-                                 else { Write-Warning "Unknown data type for timestamp: $($result.timestamp.GetType().FullName)" }
-                             } else { Write-Warning "Timestamp field missing or null." }
-                             if ($resultTimestamp -ne $null) {
-                                 $timeDiff = New-TimeSpan -Start $fileDateTime -End $resultTimestamp; $absDiffSeconds = [Math]::Abs($timeDiff.TotalSeconds)
-                                 if ($absDiffSeconds -lt $closestDiff) { $closestDiff = $absDiffSeconds; $bestMatch = $result } }
-                         } catch { Write-Warning "Error processing timestamp: '$($result.timestamp)' - $($_.Exception.Message)" }
-                     }
-                     if ($bestMatch -ne $null) { Write-Host "    -> Closest match found (Difference: $($closestDiff.ToString('F2'))s)." }
-                     else { Write-Host "    -> Could not find a valid, time-comparable result." }
-                 } else { Write-Host "    -> API query returned results, but none with valid coordinates." }
-             } else { Write-Host "    -> No results returned from API query within time window." }
-        } else { Write-Host "    -> Dawarich API query failed or returned null for time window." }
-    }
 
     # --- Process Best Match (if found) ---
     if ($bestMatch -ne $null) {
