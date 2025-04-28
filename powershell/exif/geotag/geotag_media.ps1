@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-Searches a selected folder for image and MP4 files, optionally updating EXIF/XMP data.
-For Images: Updates GPS, country, city, country code. Writes to existing XMP sidecar if present, otherwise writes to image file directly.
-For MP4s: Updates ONLY GPS coordinates directly into the MP4 file, overwriting the original. Country/City/Code are NOT written to MP4s.
+Searches a selected folder for image and MP4 files, optionally updating GPS and location metadata for better compatibility with Google Photos.
+For Images: Updates standard GPS tags, XMP GPS tags, country, city, country code. Writes to existing XMP sidecar if present, otherwise writes to image file directly.
+For MP4s: Updates ONLY GPS coordinates directly into the MP4 file using Google Photos preferred tags ('UserData:GPSCoordinates', 'GPSAltitude', 'Rotation'), overwriting the original. Country/City/Code are NOT written to MP4s.
 Queries a primary API (Dawarich) for location data based on a time window around the file's creation date.
 Optionally uses reverse geocoding via a secondary API (Photon) if primary data is missing or user chooses to always query.
 Writes the found data using exiftool.
@@ -18,14 +18,14 @@ This script performs the following steps:
     - Photon API URL (for reverse geocoding)
     - Default Time Window (seconds)
     - Option to Save Configuration
-    - Option to Overwrite Existing EXIF Data (Applies to all relevant tags for images, only GPS for MP4s)
+    - Option to Overwrite Existing EXIF Data (Applies to relevant tags for images and MP4s)
     - Option to Always Query Photon API for Location Details (Photon results used for Country/City/Code for images, but NOT written to MP4s)
 3.  If the user clicks OK in the GUI:
     - Saves the configuration if requested.
     - Prompts the user to select a folder to scan using a GUI.
     - Searches the selected folder for supported image/video files.
-    - Reads EXIF data for each file using exiftool.
-    - Determines if a file needs processing based on missing data OR the "Overwrite" flag.
+    - Reads EXIF/XMP/UserData tags for each file using exiftool.
+    - Determines if a file needs processing based on missing relevant GPS data OR the "Overwrite" flag.
     - If processing is needed:
         a. Determines the creation date.
         b. Queries the configured Dawarich API using a time window around the creation date.
@@ -33,8 +33,8 @@ This script performs the following steps:
         d. If coordinates found:
             i.   Optionally queries Photon API for missing country/city/country code (for images), or if 'Always Query Photon' is checked. Photon results take precedence if this option is checked (for images).
             ii.  Writes data using exiftool:
-                 - For MP4 files: Writes ONLY GPSLatitude*, GPSLongitude* tags directly into the MP4 file using -overwrite_original.
-                 - For Image files: Writes GPS*, Country, City, and Country Code (XMP tag). Data is written to an existing .xmp sidecar if found, otherwise directly into the image file using -overwrite_original.
+                 - For MP4 files: Writes ONLY GPS data using 'UserData:GPSCoordinates' (formatted to 4 decimal places), 'GPSAltitude=0', and 'Rotation=0' directly into the MP4 file using -overwrite_original.
+                 - For Image files: Writes standard GPS*, XMP:GPS*, Country, City, and Country Code (XMP tag). Data is written to an existing .xmp sidecar if found, otherwise directly into the image file using -overwrite_original.
         e. If no suitable coordinates are found via the API, the file is added to a "skipped (no API data)" list.
     - If processing is not needed (data exists, overwrite off), the file is added to a "skipped (already has data)" list.
 4.  Outputs status messages during processing, including warnings for large files.
@@ -46,6 +46,8 @@ The API keys and URLs are now primarily managed via the GUI and optional config 
 Processing large video files can be slow due to I/O limitations.
 Writing data overwrites the original files (using exiftool -overwrite_original) for MP4s and for images that do NOT have an existing XMP sidecar. If an image sidecar exists, it will be updated instead. It is strongly recommended to back up your files beforehand!
 The configuration file (config.json) stores settings, including the API key, in plain text in the script's directory. Handle this file with care.
+MP4 tags ('UserData:GPSCoordinates', 'GPSAltitude', 'Rotation') are based on common requirements for Google Photos compatibility.
+Image tags include standard EXIF GPS and XMP GPS for broad compatibility.
 #>
 
 #region Configuration Defaults & File Handling
@@ -274,7 +276,8 @@ function Show-ConfigurationGui {
     $checkboxOverwrite = New-Object System.Windows.Forms.CheckBox
     $checkboxOverwrite.Location = New-Object System.Drawing.Point(15, $yPos)
     $checkboxOverwrite.Size = New-Object System.Drawing.Size(400, $controlHeight)
-    $checkboxOverwrite.Text = "Overwrite existing data (GPS/Country/City/Code for Images, ONLY GPS for MP4s)" # Updated text
+    # Updated text to be more generic about GPS tags
+    $checkboxOverwrite.Text = "Overwrite existing GPS/Location data in files"
     $checkboxOverwrite.Checked = $InitialConfig.overwriteExisting
     $form.Controls.Add($checkboxOverwrite)
     $yPos += $controlHeight + $spacing
@@ -517,29 +520,21 @@ function Get-LocationFromPhoton {
 }
 
 # Function to write EXIF/XMP data using exiftool
-# ** MODIFIED **: Writes ONLY GPS to MP4 directly. Writes GPS/Country/City/Code to Images (Sidecar or Direct).
+# ** MODIFIED **: Writes Google Photos compatible tags to MP4s. Writes standard/XMP GPS to Images.
 function Set-ExifData {
     param(
         [string]$ExiftoolExePath,
         [string]$FilePath,
         [double]$Latitude,
         [double]$Longitude,
-        [string]$Country,
-        [string]$City,
-        [string]$CountryCode # Added
+        [string]$Country, # Used only for images
+        [string]$City,    # Used only for images
+        [string]$CountryCode # Used only for images
         # Removed TimeoutMilliseconds parameter
     )
 
     $fileInfo = Get-Item -LiteralPath $FilePath
     $isMp4 = $fileInfo.Extension.ToLower() -eq ".mp4"
-
-    # Convert Lat/Lon for GPS tags
-    $latStr = $Latitude.ToString([System.Globalization.CultureInfo]::InvariantCulture)
-    $lonStr = $Longitude.ToString([System.Globalization.CultureInfo]::InvariantCulture)
-    $latRef = if ($Latitude -ge 0) { "N" } else { "S" }
-    $lonRef = if ($Longitude -ge 0) { "E" } else { "W" }
-    $latAbs = [Math]::Abs($Latitude).ToString([System.Globalization.CultureInfo]::InvariantCulture)
-    $lonAbs = [Math]::Abs($Longitude).ToString([System.Globalization.CultureInfo]::InvariantCulture)
 
     # --- Determine Tags, Output Target, and Exiftool Arguments ---
     $tagArgs = @()
@@ -548,15 +543,24 @@ function Set-ExifData {
     $xmpFilePath = ""
 
     if ($isMp4) {
-        # --- MP4: Write ONLY GPS tags directly to the file ---
-        $outputTargetDescription = "GPS into MP4 file '$($fileInfo.Name)'"
+        # --- MP4: Write Google Photos compatible tags ---
+        $outputTargetDescription = "GPS (Google Photos format) into MP4 file '$($fileInfo.Name)'"
 
-        # Only include GPS tags for MP4
+        # Format Latitude and Longitude for UserData:GPSCoordinates: "[+-]Lat.DDDD, [+-]Lon.DDDD, Alt"
+        # Use InvariantCulture for decimal formatting to ensure '.' is used. Format to 4 decimal places.
+        $latFormatted = ([Math]::Abs($Latitude)).ToString("F4", [System.Globalization.CultureInfo]::InvariantCulture)
+        $lonFormatted = ([Math]::Abs($Longitude)).ToString("F4", [System.Globalization.CultureInfo]::InvariantCulture)
+        $latSign = if ($Latitude -ge 0) { "+" } else { "-" }
+        $lonSign = if ($Longitude -ge 0) { "+" } else { "-" }
+        # Construct the string: +lat.dddd, +lon.dddd, 0 (altitude 0 assumed)
+        $userDataGpsString = '"{0}{1}, {2}{3}, 0"' -f $latSign, $latFormatted, $lonSign, $lonFormatted
+
+        # Define the tags for MP4
         $tagArgs = @(
-            "-GPSLatitude=$latAbs",
-            "-GPSLatitudeRef=$latRef",
-            "-GPSLongitude=$lonAbs",
-            "-GPSLongitudeRef=$lonRef"
+            "-UserData:GPSCoordinates=$userDataGpsString",
+            "-GPSAltitude=0", # Set default altitude
+            "-GPSAltitudeRef=0", # 0 = Above Sea Level (Common default)
+            "-Rotation=0" # Set default rotation
         )
 
         $exifArgs += "-overwrite_original" # Overwrite the original MP4
@@ -564,14 +568,23 @@ function Set-ExifData {
         $exifArgs += "`"$FilePath`""       # Target file is the MP4 itself
 
     } else {
-        # --- Image Files: Write all tags (GPS, Country, City, Code) ---
+        # --- Image Files: Write standard EXIF and XMP GPS tags + location details ---
+        $outputTargetDescription = "metadata into image file '$($fileInfo.Name)'" # Default description
 
-        # Include all relevant tags for images
+        # Convert Lat/Lon for standard EXIF GPS tags
+        $latRef = if ($Latitude -ge 0) { "N" } else { "S" }
+        $lonRef = if ($Longitude -ge 0) { "E" } else { "W" }
+        $latAbs = [Math]::Abs($Latitude).ToString([System.Globalization.CultureInfo]::InvariantCulture)
+        $lonAbs = [Math]::Abs($Longitude).ToString([System.Globalization.CultureInfo]::InvariantCulture)
+
+        # Include standard EXIF GPS, XMP GPS, and location tags for images
         $tagArgs = @(
             "-GPSLatitude=$latAbs",
             "-GPSLatitudeRef=$latRef",
             "-GPSLongitude=$lonAbs",
-            "-GPSLongitudeRef=$lonRef"
+            "-GPSLongitudeRef=$lonRef",
+            "-XMP:GPSLatitude=$latAbs",    # Add XMP Latitude
+            "-XMP:GPSLongitude=$lonAbs"   # Add XMP Longitude
         )
         if (-not [string]::IsNullOrWhiteSpace($Country)) {
             $tagArgs += "-Country=`"$Country`"" # Quote value
@@ -596,7 +609,7 @@ function Set-ExifData {
             $exifArgs += "`"$FilePath`""
         } else {
             # Sidecar does not exist for image, write directly to image file
-            $outputTargetDescription = "metadata into image file '$($fileInfo.Name)'"
+            # Output description already set above
             $exifArgs += "-overwrite_original"
             $exifArgs += $tagArgs
             $exifArgs += "`"$FilePath`""
@@ -755,11 +768,20 @@ foreach ($file in $filesToProcess) {
         Write-Host "    -> Large file detected ($($file.Length / 1MB -as [int]) MB). Exiftool processing may take some time..." -ForegroundColor Yellow
     }
 
-    # ** Read EXIF data using Invoke-Expression **
-    # Read all potentially relevant tags for checking, even if not all are written back
+    # ** Read EXIF/XMP/UserData data using Invoke-Expression **
+    # Read all potentially relevant tags for checking existing data
     $exifReadArgs = @(
-        "-j", "-GPSLatitude", "-GPSLongitude", "-Country", "-City", "-XMP-iptcCore:CountryCode",
-        "-DateTimeOriginal", "-CreateDate", "-MediaCreateDate", "-TrackCreateDate", "-FilePath"
+        "-j", # JSON output
+        # Standard GPS (primarily for images)
+        "-GPSLatitude", "-GPSLongitude",
+        # Google Photos Video GPS Tag
+        "-UserData:GPSCoordinates",
+        # Location Details (Images)
+        "-Country", "-City", "-XMP-iptcCore:CountryCode",
+        # Date Tags
+        "-DateTimeOriginal", "-CreateDate", "-MediaCreateDate", "-TrackCreateDate",
+        # File Path
+        "-FilePath"
     )
     $exifJson = $null; $exifData = $null
     try {
@@ -776,13 +798,18 @@ foreach ($file in $filesToProcess) {
              Write-Warning "    Failed to parse JSON output from exiftool read for '$($file.Name)'. Raw output: $exifOutput"
              $fileHadError = $true; $errorCount++; continue # Error, count and skip to next file
         } elseif ($exifJson -eq $null) {
-             Write-Host "    No parsable EXIF data structure retrieved for '$($file.Name)'. Skipping."
+             # If output was empty, this is expected, otherwise log it
+             if (-not ([string]::IsNullOrWhiteSpace($exifOutput))) {
+                 Write-Host "    No parsable EXIF/XMP/UserData structure retrieved for '$($file.Name)'. Skipping."
+             } else {
+                 Write-Host "    No EXIF/XMP/UserData data found for '$($file.Name)'. Skipping."
+             }
              continue # No data, skip to next file
         }
 
         if ($exifJson -is [array]) {
              if ($exifJson.Count -gt 0) { $exifData = $exifJson[0] }
-             else { Write-Host "    Exiftool returned empty data array for '$($file.Name)' (No EXIF)."; $exifData = $null }
+             else { Write-Host "    Exiftool returned empty data array for '$($file.Name)'."; $exifData = $null }
         } else { $exifData = $exifJson }
 
     } catch {
@@ -793,33 +820,49 @@ foreach ($file in $filesToProcess) {
 
     if ($exifData -eq $null) { continue } # Skip if no data structure
 
-    # Check existing tags
-    $gpsLat = $null; $gpsLon = $null; $country = $null; $city = $null; $countryCode = $null
-    if ($exifData.PSObject.Properties.Name -contains 'GPSLatitude') { $gpsLat = $exifData.GPSLatitude }
-    if ($exifData.PSObject.Properties.Name -contains 'GPSLongitude') { $gpsLon = $exifData.GPSLongitude }
-    # Only check Country/City/Code if it's NOT an MP4, as they are irrelevant for MP4 processing decision now
-    if (-not $isMp4File) {
+    # Check existing tags relevant to the file type
+    $gpsLat = $null; $gpsLon = $null; $country = $null; $city = $null; $countryCode = $null; $userDataGps = $null
+    $hasRequiredData = $false
+
+    if ($isMp4File) {
+        # For MP4, check UserData:GPSCoordinates
+        if ($exifData.PSObject.Properties.Name -contains 'UserData:GPSCoordinates') {
+            $userDataGps = $exifData.'UserData:GPSCoordinates'
+            if (-not [string]::IsNullOrWhiteSpace($userDataGps)) {
+                $hasRequiredData = $true
+            }
+        }
+    } else {
+        # For Images, check standard GPS and location tags
+        $hasGps = $false
+        $hasLocation = $false
+        if ($exifData.PSObject.Properties.Name -contains 'GPSLatitude') { $gpsLat = $exifData.GPSLatitude }
+        if ($exifData.PSObject.Properties.Name -contains 'GPSLongitude') { $gpsLon = $exifData.GPSLongitude }
+        if (($gpsLat -ne $null) -and ($gpsLon -ne $null) -and ($gpsLat -ne 0 -or $gpsLon -ne 0)) {
+             $hasGps = $true
+        }
+
         if ($exifData.PSObject.Properties.Name -contains 'Country') { $country = $exifData.Country }
         if ($exifData.PSObject.Properties.Name -contains 'City') { $city = $exifData.City }
         if ($exifData.PSObject.Properties.Name -contains 'XMP-iptcCore:CountryCode') { $countryCode = $exifData.'XMP-iptcCore:CountryCode' }
+        if (-not ([string]::IsNullOrWhiteSpace($country) -and [string]::IsNullOrWhiteSpace($city) -and [string]::IsNullOrWhiteSpace($countryCode))) {
+            $hasLocation = $true
+        }
+        # Image has required data if it has both GPS and some location info
+        if ($hasGps -and $hasLocation) {
+            $hasRequiredData = $true
+        }
     }
 
-    # Determine if processing is needed based on missing data OR overwrite flag
+    # Determine if processing is needed
     $shouldProcessFile = $false
     if ($overwriteExistingData) {
         $shouldProcessFile = $true
         Write-Host "    -> Overwrite flag set. Processing file..."
-    } else {
-        # Always check for missing GPS
-        if (($gpsLat -eq $null) -or ($gpsLon -eq $null) -or ($gpsLat -eq 0 -and $gpsLon -eq 0)) {
-            Write-Host "    -> GPS coordinates missing or zero."; $shouldProcessFile = $true
-        }
-        # Only check Country/City/Code if it's an image file
-        if (-not $isMp4File) {
-            if ([string]::IsNullOrWhiteSpace($country)) { Write-Host "    -> Country missing (Image)."; $shouldProcessFile = $true }
-            if ([string]::IsNullOrWhiteSpace($city)) { Write-Host "    -> City missing (Image)."; $shouldProcessFile = $true }
-            if ([string]::IsNullOrWhiteSpace($countryCode)) { Write-Host "    -> Country Code missing (Image)."; $shouldProcessFile = $true }
-        }
+    } elseif (-not $hasRequiredData) {
+        $shouldProcessFile = $true
+        if ($isMp4File) { Write-Host "    -> MP4 UserData:GPSCoordinates missing." }
+        else { Write-Host "    -> Image GPS or Location data missing." }
     }
 
     if (-not $shouldProcessFile) {
@@ -850,8 +893,6 @@ foreach ($file in $filesToProcess) {
     Write-Host "    Determined creation date (UTC): $fileTimestampUTC"
 
     # --- Dawarich API Query (Time Window Only) ---
-    # REMOVED Exact Match Query Block
-
     # Directly query using the time window
     $startDate = $fileDateTime.AddSeconds(-$defaultTimeWindowSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ")
     $endDate = $fileDateTime.AddSeconds($defaultTimeWindowSeconds).ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -955,7 +996,7 @@ foreach ($file in $filesToProcess) {
         # Check coordinates again (redundant check based on above logic, but safe)
         if (($latitude -ne 0 -or $longitude -ne 0)) {
             if ($isMp4File) {
-                Write-Host "    Writing GPS data to MP4 '$($file.Name)': Lat=$latitude, Lon=$longitude"
+                Write-Host "    Writing GPS data to MP4 '$($file.Name)' (Google Photos format)..."
             } else {
                 Write-Host "    Writing data to Image '$($file.Name)': Lat=$latitude, Lon=$longitude, Country='$countryToWrite', City='$cityToWrite', Code='$countryCodeToWrite'"
             }
